@@ -35,7 +35,7 @@ const (
 var (
 
 	// labels are the static labels that come with every metric
-	labels = []string{"region", "instance"}
+	labels = []string{"region"}
 
 	storage = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "storage"),
