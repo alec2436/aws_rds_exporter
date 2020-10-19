@@ -137,10 +137,6 @@ func (e *exporter) Collect(ch chan<- prometheus.Metric) {
 			storage, prometheus.GaugeValue, float64(r.AS), e.region, r.ID,
 		)
 	}
-
-	// ch <- prometheus.MustNewConstMetric(
-	// 	storage, prometheus.GaugeValue, 4.0, "us-east-1",
-	// )
 }
 
 func init() {
