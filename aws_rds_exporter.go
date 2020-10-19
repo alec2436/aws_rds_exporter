@@ -9,7 +9,6 @@ import (
 	// "runtime"
 	// "syscall"
 	// "text/tabwriter"
-	"reflect"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -35,15 +34,21 @@ const (
 var (
 
 	// labels are the static labels that come with every metric
-	labels = []string{"region"}
+	labels = []string{"region", "instance"}
 
 	storage = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "storage"),
 		"Amount of storage for the RDS instance",
-		labels, // labels
+		labels,
 		nil,
 	)
 )
+
+// RDSService represents a service on an RDS instance
+type DBInstance struct {
+	ID         string // Instance Identifier
+	AS         int // allocated storage
+}
 
 type promHTTPLogger struct {
 	logger log.Logger
@@ -53,8 +58,60 @@ func (l promHTTPLogger) Println(v ...interface{}) {
 	level.Error(l.logger).Log("msg", fmt.Sprint(v...))
 }
 
+// RDSClient is a wrapper for AWS rds client that implements helpers to get RDS metrics
+type RDSClient struct {
+	client        rdsiface.RDSAPI
+	apiMaxResults int64
+}
+
+// RDSGatherer is the interface that implements the methods required to gather RDS data
+type RDSGatherer interface {
+	GetRDSInstances() ([]*DBInstance, error)
+}
+
+// NewRDSClient will return an initialized RDSClient
+func NewRDSClient(awsRegion string) (*RDSClient, error) {
+	// Create AWS session
+	s := session.New(&aws.Config{Region: aws.String(awsRegion)})
+	if s == nil {
+		return nil, fmt.Errorf("error creating aws session")
+	}
+
+	return &RDSClient{
+		client:        rds.New(s),
+		apiMaxResults: 100,
+	}, nil
+}
+
+// GetRDSInstances will get the instances from the RDS API
+func (e *RDSClient) GetRDSInstances() ([]*DBInstance, error) {
+	rs := []*DBInstance{}
+	params := &rds.DescribeDBInstancesInput{
+	}
+
+	resp, err := e.client.DescribeDBInstances(params)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, pa := range resp.DBInstances {
+
+		var b = int(*(pa.AllocatedStorage))
+		db := &DBInstance{
+			ID: aws.StringValue(pa.DBInstanceIdentifier),
+			AS: b,
+		}
+
+		rs = append(rs, db)
+	}
+
+	// log.Info("Got %d clusters", len(rs))
+	return rs, nil
+}
+
 type exporter struct {
-	api    rdsiface.RDSAPI
+	client    RDSGatherer
+	region string
 }
 
 // Describe describes the metrics exported by the RDS exporter. It
@@ -66,9 +123,24 @@ func (e *exporter) Describe(ch chan<- *prometheus.Desc) {
 // Collect fetches the stats from the configured RDS and delivers them
 // as Prometheus metrics. It implements prometheus.Collector
 func (e *exporter) Collect(ch chan<- prometheus.Metric) {
-	ch <- prometheus.MustNewConstMetric(
-		storage, prometheus.GaugeValue, 4.0, "us-east-1",
-	)
+
+
+	rs, err := e.client.GetRDSInstances()
+
+	if err != nil {
+		// log.Error("Error collecting rds metrics")
+		return
+	}
+
+	for _, r := range rs {
+		ch <- prometheus.MustNewConstMetric(
+			storage, prometheus.GaugeValue, float64(r.AS), e.region, r.ID,
+		)
+	}
+
+	// ch <- prometheus.MustNewConstMetric(
+	// 	storage, prometheus.GaugeValue, 4.0, "us-east-1",
+	// )
 }
 
 func init() {
@@ -92,21 +164,18 @@ func run() int {
 	fmt.Printf("Starting aws-rds-exporter...")
 	fmt.Printf("\n")
 
-	sess, err := session.NewSession(&aws.Config{Region: aws.String("us-east-1")})
+	RdsClient, err := NewRDSClient("us-east-1")
 
-	if err != nil {
-		fmt.Printf("Error getting session")
+	if (err != nil) {
+		fmt.Printf("Error with rds client")
 		return 1
 	}
 
-	if sess == nil {
-		fmt.Printf("Error getting session after first error")
-	} else {
-		sType := reflect.TypeOf(sess)
-		fmt.Printf(sType.String())
+	// exporter := &exporter{api: rds.New(sess)}
+	exporter := &exporter{
+		client: RdsClient,
+		region: "us-east-1",
 	}
-
-	exporter := &exporter{api: rds.New(sess)}
 	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricsPath,
